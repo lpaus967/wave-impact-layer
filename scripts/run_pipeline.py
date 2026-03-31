@@ -172,7 +172,6 @@ def process_lake(config: LakeConfig, wind_speed: float = None, wind_dir: float =
             ok = run_step([
                 python, str(SCRIPTS_DIR / '04_hrrr_wave_layer.py'),
                 '--lake', lake_id,
-                '--latest',
             ], 'hrrr_wave', lake_id)
 
         if not ok:

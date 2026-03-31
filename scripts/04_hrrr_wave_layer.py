@@ -8,7 +8,7 @@ Fetches current or forecast HRRR wind data and generates wave impact layers.
 import argparse
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys
 import numpy as np
 import json
@@ -23,66 +23,70 @@ logger = logging.getLogger(__name__)
 
 def get_latest_hrrr_time() -> datetime:
     """Get the latest available HRRR forecast time (~3 hours ago)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     latest = now - timedelta(hours=3)
     latest = latest.replace(minute=0, second=0, microsecond=0)
     return latest
 
 
-def fetch_hrrr_wind(date: datetime, lat: float, lon: float, fxx: int = 0):
+def fetch_hrrr_wind(date: datetime, lat: float, lon: float):
     """
-    Fetch HRRR wind components for a specific location.
-    
+    Fetch current HRRR analysis wind components for a specific location.
+
     Args:
-        date: Forecast initialization datetime
+        date: HRRR cycle datetime
         lat: Latitude
         lon: Longitude
-        fxx: Forecast hour (0 = analysis)
-        
+
     Returns:
         Tuple of (u_wind, v_wind) in m/s
     """
     from herbie import Herbie
-    
-    logger.info(f"Fetching HRRR wind for {date.strftime('%Y-%m-%d %H:00')} F{fxx:02d}")
+
+    logger.info(f"Fetching HRRR wind for {date.strftime('%Y-%m-%d %H:00')}")
     logger.info(f"Location: {lat}, {lon}")
-    
-    try:
-        # Create Herbie object
-        H = Herbie(date, model='hrrr', product='sfc', fxx=fxx)
-        
-        # Download U and V wind components at 10m
-        ds_u = H.xarray("UGRD:10 m")
-        ds_v = H.xarray("VGRD:10 m")
-        
-        # Extract point values using nearest neighbor
-        # Find nearest grid point
-        u_data = ds_u['u10'].values
-        v_data = ds_v['v10'].values
-        lats = ds_u['latitude'].values
-        lons = ds_u['longitude'].values
-        
-        # Handle 2D lat/lon arrays
-        if lats.ndim == 2:
-            # Find nearest point
-            dist = np.sqrt((lats - lat)**2 + (lons - lon)**2)
-            idx = np.unravel_index(np.argmin(dist), dist.shape)
-            u_wind = float(u_data[idx])
-            v_wind = float(v_data[idx])
-        else:
-            # 1D coordinate arrays
-            lat_idx = np.argmin(np.abs(lats - lat))
-            lon_idx = np.argmin(np.abs(lons - lon))
-            u_wind = float(u_data[lat_idx, lon_idx])
-            v_wind = float(v_data[lat_idx, lon_idx])
-        
-        logger.info(f"U wind: {u_wind:.2f} m/s, V wind: {v_wind:.2f} m/s")
-        
-        return u_wind, v_wind
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch HRRR data: {e}")
-        raise
+
+    # Try the requested cycle, then fall back to earlier cycles
+    max_retries = 4
+    for attempt in range(max_retries):
+        try_date = date - timedelta(hours=attempt)
+        try:
+            if attempt > 0:
+                logger.info(f"Retrying with HRRR cycle {try_date.strftime('%Y-%m-%d %H:00')}")
+
+            H = Herbie(try_date, model='hrrr', product='sfc', fxx=0)
+
+            ds_u = H.xarray("UGRD:10 m")
+            ds_v = H.xarray("VGRD:10 m")
+
+            u_data = ds_u['u10'].values
+            v_data = ds_v['v10'].values
+            lats = ds_u['latitude'].values
+            lons = ds_u['longitude'].values
+
+            if lats.ndim == 2:
+                dist = np.sqrt((lats - lat)**2 + (lons - lon)**2)
+                idx = np.unravel_index(np.argmin(dist), dist.shape)
+                u_wind = float(u_data[idx])
+                v_wind = float(v_data[idx])
+            else:
+                lat_idx = np.argmin(np.abs(lats - lat))
+                lon_idx = np.argmin(np.abs(lons - lon))
+                u_wind = float(u_data[lat_idx, lon_idx])
+                v_wind = float(v_data[lat_idx, lon_idx])
+
+            logger.info(f"U wind: {u_wind:.2f} m/s, V wind: {v_wind:.2f} m/s")
+
+            return u_wind, v_wind
+
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(f"HRRR cycle {try_date.strftime('%Y-%m-%d %H:00')} not available: {e}")
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to fetch HRRR data after {max_retries} cycle attempts")
+                raise
+        except Exception as e:
+            logger.error(f"Failed to fetch HRRR data: {e}")
+            raise
 
 
 def calculate_wind_speed_direction(u: float, v: float) -> tuple:
@@ -107,19 +111,19 @@ def calculate_wind_speed_direction(u: float, v: float) -> tuple:
     return speed, direction
 
 
-def generate_wave_layer_from_hrrr(lake: str, date: datetime = None, fxx: int = 0,
+def generate_wave_layer_from_hrrr(lake: str, date: datetime = None,
                                   output_dir: Path = Path('data/output')):
     """
-    Generate wave impact layer using live HRRR data.
+    Generate wave impact layer using current HRRR analysis wind data.
     """
     if date is None:
         date = get_latest_hrrr_time()
-    
+
     # Get lake center from config
     config = load_lake_config(lake)
 
     # Fetch wind data
-    u_wind, v_wind = fetch_hrrr_wind(date, config.lat, config.lon, fxx)
+    u_wind, v_wind = fetch_hrrr_wind(date, config.lat, config.lon)
     
     # Calculate speed and direction
     wind_speed, wind_direction = calculate_wind_speed_direction(u_wind, v_wind)
@@ -161,9 +165,7 @@ def generate_wave_layer_from_hrrr(lake: str, date: datetime = None, fxx: int = 0
             metadata = json.load(f)
         
         metadata['hrrr'] = {
-            'initialization_time': date.strftime('%Y-%m-%d %H:00 UTC'),
-            'forecast_hour': fxx,
-            'valid_time': (date + timedelta(hours=fxx)).strftime('%Y-%m-%d %H:00 UTC'),
+            'analysis_time': date.strftime('%Y-%m-%d %H:00 UTC'),
             'u_wind_ms': u_wind,
             'v_wind_ms': v_wind,
             'wind_speed_ms': wind_speed,
@@ -178,77 +180,14 @@ def generate_wave_layer_from_hrrr(lake: str, date: datetime = None, fxx: int = 0
     return output_dir
 
 
-def generate_forecast_sequence(lake: str, date: datetime = None, 
-                               forecast_hours: list = None,
-                               output_dir: Path = Path('data/output')):
-    """
-    Generate wave layers for a sequence of forecast hours.
-    
-    Useful for timeline scrubbing visualization.
-    """
-    if date is None:
-        date = get_latest_hrrr_time()
-    
-    if forecast_hours is None:
-        forecast_hours = list(range(0, 25, 3))  # 0, 3, 6, ... 24
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    results = []
-    
-    for fxx in forecast_hours:
-        fxx_dir = output_dir / f"f{fxx:02d}"
-        fxx_dir.mkdir(exist_ok=True)
-        
-        try:
-            result = generate_wave_layer_from_hrrr(lake, date, fxx, fxx_dir)
-            
-            valid_time = date + timedelta(hours=fxx)
-            results.append({
-                'forecast_hour': fxx,
-                'valid_time': valid_time.strftime('%Y-%m-%d %H:00 UTC'),
-                'output_dir': str(fxx_dir),
-                'status': 'success'
-            })
-        except Exception as e:
-            logger.error(f"Failed to generate F{fxx:02d}: {e}")
-            results.append({
-                'forecast_hour': fxx,
-                'status': 'failed',
-                'error': str(e)
-            })
-    
-    # Save forecast index
-    index = {
-        'lake': lake,
-        'initialization_time': date.strftime('%Y-%m-%d %H:00 UTC'),
-        'forecasts': results
-    }
-    
-    index_path = output_dir / "forecast_index.json"
-    with open(index_path, 'w') as f:
-        json.dump(index, f, indent=2)
-    
-    logger.info(f"Generated {len([r for r in results if r['status'] == 'success'])} forecast layers")
-    logger.info(f"Index saved to {index_path}")
-    
-    return results
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Generate wave layer from HRRR')
+    parser = argparse.ArgumentParser(description='Generate wave layer from current HRRR winds')
     parser.add_argument('--lake', type=str, default='champlain',
                         help='Lake ID (must have config in data/lakes/{lake}/config.json)')
-    parser.add_argument('--latest', action='store_true',
-                        help='Use latest HRRR forecast')
     parser.add_argument('--date', type=str,
-                        help='Forecast date (YYYY-MM-DD)')
+                        help='HRRR cycle date (YYYY-MM-DD)')
     parser.add_argument('--cycle', type=int,
-                        help='Forecast cycle hour (0-23)')
-    parser.add_argument('--fxx', type=int, default=0,
-                        help='Forecast hour (0-48)')
-    parser.add_argument('--forecast-sequence', action='store_true',
-                        help='Generate sequence of forecast hours')
+                        help='HRRR cycle hour (0-23)')
     parser.add_argument('--output-dir', type=Path, default=None,
                         help='Output directory (default: auto-detect)')
 
@@ -260,20 +199,15 @@ def main():
         args.output_dir = LakePaths(args.lake).output_dir
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine forecast time
-    if args.latest:
-        date = get_latest_hrrr_time()
-    elif args.date:
+    # Determine HRRR cycle time
+    if args.date:
         date = datetime.strptime(f"{args.date} {args.cycle or 0}", "%Y-%m-%d %H")
     else:
         date = get_latest_hrrr_time()
 
-    logger.info(f"Using HRRR forecast: {date.strftime('%Y-%m-%d %H:00 UTC')}")
+    logger.info(f"Using HRRR analysis: {date.strftime('%Y-%m-%d %H:00 UTC')}")
 
-    if args.forecast_sequence:
-        generate_forecast_sequence(args.lake, date, output_dir=args.output_dir)
-    else:
-        generate_wave_layer_from_hrrr(args.lake, date, args.fxx, args.output_dir)
+    generate_wave_layer_from_hrrr(args.lake, date, args.output_dir)
 
 
 if __name__ == '__main__':
