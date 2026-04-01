@@ -3,7 +3,14 @@
     "allow": [
       "Bash(python -c \":*)",
       "Bash(python:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "WebSearch",
+      "WebFetch(domain:www.umesc.usgs.gov)",
+      "WebFetch(domain:hal.science)",
+      "WebFetch(domain:open.metu.edu.tr)",
+      "WebFetch(domain:planetcalc.com)",
+      "WebFetch(domain:www.nature.com)",
+      "WebFetch(domain:www.datainwater.com)"
     ]
   }
 }

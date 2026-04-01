@@ -33,6 +33,32 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def auto_wave_params(area_km2: float) -> dict:
+    """
+    Scale wave polyline parameters based on lake area.
+
+    Uses sqrt(area) as a proxy for characteristic lake dimension.
+    Tuned so that Lake Champlain (~1100 km²) gets ~800m spacing
+    and a small reservoir (~2.5 km²) gets ~80m spacing.
+    """
+    scale = np.sqrt(area_km2)
+    # line_spacing: ~25 * sqrt(area), clamped to [60, 1200]m
+    line_spacing = np.clip(25.0 * scale, 60.0, 1200.0)
+    # segment_length: ~10 * sqrt(area), clamped to [30, 500]m
+    segment_length = np.clip(10.0 * scale, 30.0, 500.0)
+    # wave_amplitude: ~5 * sqrt(area), clamped to [15, 200]m
+    wave_amplitude = np.clip(5.0 * scale, 15.0, 200.0)
+    # wave_frequency: inversely proportional to scale
+    wave_frequency = np.clip(0.07 / scale, 0.001, 0.02)
+
+    return {
+        'line_spacing': float(line_spacing),
+        'segment_length': float(segment_length),
+        'wave_amplitude': float(wave_amplitude),
+        'wave_frequency': float(wave_frequency),
+    }
+
+
 def _get_utm_crs_from_fetch(fetch_dir: Path) -> str:
     """Read UTM CRS from fetch index, falling back to EPSG:32618."""
     index_path = fetch_dir / "fetch_index.json"
@@ -484,17 +510,18 @@ def main():
                         help='Wind direction in degrees')
     parser.add_argument('--output-dir', type=Path, default=None,
                         help='Output directory (default: auto-detect)')
-    parser.add_argument('--line-spacing', type=float, default=800.0,
-                        help='Spacing between wave lines in meters')
+    parser.add_argument('--line-spacing', type=float, default=None,
+                        help='Spacing between wave lines in meters (default: auto by lake size)')
     parser.add_argument('--point-spacing', type=float, default=100.0,
                         help='Spacing between bank impact points in meters')
-    parser.add_argument('--segment-length', type=float, default=300.0,
-                        help='Length of wave line segments in meters (for varying intensity)')
+    parser.add_argument('--segment-length', type=float, default=None,
+                        help='Length of wave line segments in meters (default: auto by lake size)')
 
     args = parser.parse_args()
 
     # Auto-detect paths from project root
-    paths = LakePaths(args.lake)
+    config = load_lake_config(args.lake)
+    paths = LakePaths(config.lake_id)
     lake_polygon_path = paths.polygon
     fetch_dir = paths.fetch_dir
     output_dir = args.output_dir if args.output_dir else paths.output_dir
@@ -517,16 +544,25 @@ def main():
     # Determine UTM CRS from fetch rasters
     utm_crs = _get_utm_crs_from_fetch(fetch_dir)
 
-    logger.info(f"Generating styled layers for {args.lake}")
+    # Auto-scale wave parameters based on lake area
+    wave_params = auto_wave_params(config.area_km2)
+    line_spacing = args.line_spacing if args.line_spacing is not None else wave_params['line_spacing']
+    segment_length = args.segment_length if args.segment_length is not None else wave_params['segment_length']
+
+    logger.info(f"Generating styled layers for {args.lake} ({config.area_km2:.1f} km²)")
     logger.info(f"Wind: {args.wind_speed} m/s from {args.wind_dir}°")
+    logger.info(f"Wave params: line_spacing={line_spacing:.0f}m, segment_length={segment_length:.0f}m, "
+                f"amplitude={wave_params['wave_amplitude']:.0f}m, frequency={wave_params['wave_frequency']:.4f}")
 
     # Generate wave polylines
     wave_lines_path = output_dir / "wave_polylines.geojson"
     generate_wave_polylines(
         lake_polygon_path, fetch_dir,
         args.wind_speed, args.wind_dir,
-        wave_lines_path, args.line_spacing,
-        segment_length=args.segment_length,
+        wave_lines_path, line_spacing,
+        wave_amplitude=wave_params['wave_amplitude'],
+        wave_frequency=wave_params['wave_frequency'],
+        segment_length=segment_length,
         utm_crs=utm_crs
     )
 

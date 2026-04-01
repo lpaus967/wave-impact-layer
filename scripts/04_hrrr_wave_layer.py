@@ -21,40 +21,63 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def get_latest_hrrr_time() -> datetime:
-    """Get the latest available HRRR forecast time (~3 hours ago)."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    latest = now - timedelta(hours=3)
-    latest = latest.replace(minute=0, second=0, microsecond=0)
-    return latest
-
-
-def fetch_hrrr_wind(date: datetime, lat: float, lon: float):
+def get_hrrr_cycle_and_forecast() -> tuple:
     """
-    Fetch current HRRR analysis wind components for a specific location.
+    Determine the best HRRR cycle and forecast hour for current conditions.
+
+    HRRR runs hourly and is typically available ~45-90 min after cycle time.
+    Uses a short-range forecast from the most recent available cycle to
+    represent current wind conditions.
+
+    Returns:
+        (cycle_datetime, forecast_hour) — e.g. (2026-04-01 14:00, 2)
+        means the fxx=2 forecast from the 14Z cycle, valid at 16Z.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+
+    # Try cycles from 1 hour ago back to 4 hours ago.
+    # For each cycle, compute the forecast hour that targets the current time.
+    for lag in range(1, 5):
+        cycle = current_hour - timedelta(hours=lag)
+        fxx = lag  # forecast hour to reach current time
+        if fxx <= 18:  # HRRR forecasts go up to 18h (48h for 00/06/12/18Z)
+            return cycle, fxx
+
+    # Fallback: 4 hours ago, analysis
+    return current_hour - timedelta(hours=4), 0
+
+
+def fetch_hrrr_wind(date: datetime, lat: float, lon: float, fxx: int = 0):
+    """
+    Fetch HRRR wind components for a specific location.
 
     Args:
         date: HRRR cycle datetime
         lat: Latitude
         lon: Longitude
+        fxx: Forecast hour (0 = analysis, 1+ = forecast)
 
     Returns:
-        Tuple of (u_wind, v_wind) in m/s
+        Tuple of (u_wind, v_wind, cycle_used, fxx_used) in m/s
     """
     from herbie import Herbie
 
-    logger.info(f"Fetching HRRR wind for {date.strftime('%Y-%m-%d %H:00')}")
+    valid_time = date + timedelta(hours=fxx)
+    logger.info(f"Fetching HRRR wind — cycle: {date.strftime('%Y-%m-%d %H:00')}, "
+                f"fxx={fxx}, valid: {valid_time.strftime('%Y-%m-%d %H:00')}")
     logger.info(f"Location: {lat}, {lon}")
 
     # Try the requested cycle, then fall back to earlier cycles
     max_retries = 4
     for attempt in range(max_retries):
         try_date = date - timedelta(hours=attempt)
+        try_fxx = fxx + attempt  # keep the valid time the same
         try:
             if attempt > 0:
-                logger.info(f"Retrying with HRRR cycle {try_date.strftime('%Y-%m-%d %H:00')}")
+                logger.info(f"Retrying with cycle {try_date.strftime('%Y-%m-%d %H:00')} fxx={try_fxx}")
 
-            H = Herbie(try_date, model='hrrr', product='sfc', fxx=0)
+            H = Herbie(try_date, model='hrrr', product='sfc', fxx=try_fxx)
 
             ds_u = H.xarray("UGRD:10 m")
             ds_v = H.xarray("VGRD:10 m")
@@ -77,10 +100,11 @@ def fetch_hrrr_wind(date: datetime, lat: float, lon: float):
 
             logger.info(f"U wind: {u_wind:.2f} m/s, V wind: {v_wind:.2f} m/s")
 
-            return u_wind, v_wind
+            return u_wind, v_wind, try_date, try_fxx
 
         except (FileNotFoundError, OSError) as e:
-            logger.warning(f"HRRR cycle {try_date.strftime('%Y-%m-%d %H:00')} not available: {e}")
+            logger.warning(f"HRRR cycle {try_date.strftime('%Y-%m-%d %H:00')} fxx={try_fxx} "
+                           f"not available: {e}")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to fetch HRRR data after {max_retries} cycle attempts")
                 raise
@@ -112,18 +136,21 @@ def calculate_wind_speed_direction(u: float, v: float) -> tuple:
 
 
 def generate_wave_layer_from_hrrr(lake: str, date: datetime = None,
+                                  fxx: int = None,
                                   output_dir: Path = Path('data/output')):
     """
-    Generate wave impact layer using current HRRR analysis wind data.
+    Generate wave impact layer using HRRR wind data for current conditions.
     """
     if date is None:
-        date = get_latest_hrrr_time()
+        date, fxx = get_hrrr_cycle_and_forecast()
+    elif fxx is None:
+        fxx = 0
 
     # Get lake center from config
     config = load_lake_config(lake)
 
     # Fetch wind data
-    u_wind, v_wind = fetch_hrrr_wind(date, config.lat, config.lon)
+    u_wind, v_wind, cycle_used, fxx_used = fetch_hrrr_wind(date, config.lat, config.lon, fxx)
     
     # Calculate speed and direction
     wind_speed, wind_direction = calculate_wind_speed_direction(u_wind, v_wind)
@@ -164,8 +191,11 @@ def generate_wave_layer_from_hrrr(lake: str, date: datetime = None,
         with open(metadata_path) as f:
             metadata = json.load(f)
         
+        valid_time = cycle_used + timedelta(hours=fxx_used)
         metadata['hrrr'] = {
-            'analysis_time': date.strftime('%Y-%m-%d %H:00 UTC'),
+            'cycle_time': cycle_used.strftime('%Y-%m-%d %H:00 UTC'),
+            'forecast_hour': fxx_used,
+            'valid_time': valid_time.strftime('%Y-%m-%d %H:00 UTC'),
             'u_wind_ms': u_wind,
             'v_wind_ms': v_wind,
             'wind_speed_ms': wind_speed,
@@ -199,15 +229,18 @@ def main():
         args.output_dir = LakePaths(args.lake).output_dir
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine HRRR cycle time
+    # Determine HRRR cycle time and forecast hour
     if args.date:
         date = datetime.strptime(f"{args.date} {args.cycle or 0}", "%Y-%m-%d %H")
+        fxx = 0
+        logger.info(f"Using HRRR analysis: {date.strftime('%Y-%m-%d %H:00 UTC')}")
     else:
-        date = get_latest_hrrr_time()
+        date, fxx = get_hrrr_cycle_and_forecast()
+        valid_time = date + timedelta(hours=fxx)
+        logger.info(f"Using HRRR cycle {date.strftime('%Y-%m-%d %H:00 UTC')} "
+                     f"fxx={fxx} (valid: {valid_time.strftime('%H:00 UTC')})")
 
-    logger.info(f"Using HRRR analysis: {date.strftime('%Y-%m-%d %H:00 UTC')}")
-
-    result = generate_wave_layer_from_hrrr(args.lake, date, args.output_dir)
+    result = generate_wave_layer_from_hrrr(args.lake, date, fxx, args.output_dir)
     if result is None:
         sys.exit(1)
 

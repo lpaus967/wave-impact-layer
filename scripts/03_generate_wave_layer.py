@@ -301,9 +301,10 @@ def generate_bank_impact(lake_polygon_path: Path, wind_speed_ms: float,
             length = np.sqrt(dx**2 + dy**2)
             
             if length > 0:
-                # Normal vector (perpendicular, pointing left of direction)
-                normal_x = -dy / length
-                normal_y = dx / length
+                # Normal vector pointing INTO the lake (right of traversal direction).
+                # Shapely exterior rings are CCW, so the right-hand normal points inward.
+                normal_x = dy / length
+                normal_y = -dx / length
                 
                 # Normal direction in degrees
                 normal_deg = np.degrees(np.arctan2(normal_x, normal_y)) % 360
