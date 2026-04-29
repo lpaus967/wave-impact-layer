@@ -8,7 +8,7 @@ Usage:
     python scripts/run_pipeline.py --lake "Lake Champlain"
     python scripts/run_pipeline.py --state VT --workers 4
     python scripts/run_pipeline.py --min-area 50 --workers 8
-    python scripts/run_pipeline.py --state VT --min-area 3 --workers 2
+    python scripts/run_pipeline.py --state VT --min-area 10 --workers 2
     python scripts/run_pipeline.py --lake "Lake Champlain" --wind-speed 15 --wind-dir 180  # manual override
 """
 
@@ -45,16 +45,20 @@ def _raster_valid(raster_path: Path) -> bool:
         return False
 
 
-def _fetch_data_valid(fetch_index_path: Path) -> bool:
-    """Check that fetch rasters have a valid CRS and contain actual data."""
+def _fetch_data_valid(fetch_index_path: Path, min_directions: int = 36) -> bool:
+    """Check that fetch rasters have a valid CRS, enough directions, and actual data."""
     try:
         with open(fetch_index_path) as f:
             index = json.load(f)
         crs = index.get('crs', '')
         if not crs or crs == 'None':
             return False
+        # Check we have enough directions (36 for effective fetch accuracy)
+        files = index.get('files', {})
+        if len(files) < min_directions:
+            return False
         # Spot-check the first raster file has non-zero data
-        first_file = list(index.get('files', {}).values())[0]
+        first_file = list(files.values())[0]
         raster_path = fetch_index_path.parent / first_file
         if not raster_path.exists():
             return False
@@ -243,6 +247,7 @@ def process_lake(config: LakeConfig, wind_speed: float = None, wind_dir: float =
         ok = run_step([
             python, str(SCRIPTS_DIR / '06_micro_shelters.py'),
             '--lake', lake_id,
+            '--wind-speed', str(wind_speed),
             '--wind-dir', str(wind_dir),
         ], 'shelters', lake_id)
         if not ok:
@@ -269,19 +274,22 @@ def get_lake_configs(args) -> list:
         config = load_lake_config(args.lake)
         return [config]
 
-    # Try local configs first (avoids DB round-trip on repeat runs)
-    configs = list_lakes_local(min_area_km2=min_area, states=states)
-    if configs:
-        logger.info(f"Found {len(configs)} lake(s) from local configs "
-                     f"(min area: {min_area} km², states: {states or 'all'})")
-        return configs
-
-    # No local data — query the database
-    logger.info(f"No local configs found, querying database "
+    # Query the database for all matching lakes
+    logger.info(f"Querying database for lakes "
                 f"(min area: {min_area} km², states: {states or 'all'})...")
     configs = list_lakes_from_db(min_area_km2=min_area, states=states)
-    logger.info(f"Found {len(configs)} lakes in database")
-    return configs
+
+    # Merge with local configs (local takes precedence for lakes that exist locally)
+    local_configs = list_lakes_local(min_area_km2=min_area, states=states)
+    local_ids = {c.lake_id for c in local_configs}
+    merged = list(local_configs)
+    for cfg in configs:
+        if cfg.lake_id not in local_ids:
+            merged.append(cfg)
+
+    logger.info(f"Found {len(merged)} lake(s) "
+                f"({len(local_ids)} local, {len(merged) - len(local_ids)} from database)")
+    return merged
 
 
 def main():

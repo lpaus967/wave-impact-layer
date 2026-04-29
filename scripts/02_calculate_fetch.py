@@ -26,9 +26,8 @@ from lib.paths import LakePaths
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 16 compass directions (degrees from north, clockwise)
-DIRECTIONS = [0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5, 
-              180, 202.5, 225, 247.5, 270, 292.5, 315, 337.5]
+# 36 directions at 10-degree spacing for effective fetch accuracy
+DIRECTIONS = [float(d) for d in range(0, 360, 10)]
 
 
 def calculate_fetch_single_direction(water_mask: np.ndarray, direction_deg: float, 

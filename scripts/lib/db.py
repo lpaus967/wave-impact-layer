@@ -67,18 +67,14 @@ def query_lakes(min_area_km2: float = 5.0, states: list = None,
     """
     engine = get_engine()
 
-    where_clauses = [f"l.area_sqkm >= {min_area_km2}"]
-
     if states:
         placeholders = ", ".join(f"'{s}'" for s in states)
-        where_clauses.append(
-            f"s.stusps IN ({placeholders})"
-        )
-
-    where_sql = " AND ".join(where_clauses)
-
-    # Join with states table if filtering by state
-    if states:
+        where_clauses = [
+            f"l.area_sqkm >= {min_area_km2}",
+            "l.name IS NOT NULL",
+            f"s.stusps IN ({placeholders})",
+        ]
+        where_sql = " AND ".join(where_clauses)
         sql = f"""
             SELECT l.uuid, l.name, l.area_sqkm, l.geom
             FROM hydrology.lakes l
@@ -87,6 +83,11 @@ def query_lakes(min_area_km2: float = 5.0, states: list = None,
             ORDER BY l.area_sqkm DESC
         """
     else:
+        where_clauses = [
+            f"area_sqkm >= {min_area_km2}",
+            "name IS NOT NULL",
+        ]
+        where_sql = " AND ".join(where_clauses)
         sql = f"""
             SELECT uuid, name, area_sqkm, geom
             FROM hydrology.lakes

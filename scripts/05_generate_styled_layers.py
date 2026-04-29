@@ -28,6 +28,7 @@ from shapely.ops import unary_union
 
 from lib.lake_config import load_lake_config
 from lib.paths import LakePaths
+from lib.wave_physics import wave_height_young_verhagen, classify_wave_intensity
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -72,7 +73,8 @@ def generate_wave_polylines(lake_polygon_path: Path, fetch_dir: Path,
                             wind_speed_ms: float, wind_direction: float,
                             output_path: Path, line_spacing: float = 800.0,
                             wave_amplitude: float = 150.0, wave_frequency: float = 0.002,
-                            segment_length: float = 300.0, utm_crs: str = None):
+                            segment_length: float = 300.0, utm_crs: str = None,
+                            depth_m: float = 20.0):
     """
     Generate horizontal wavy polylines across the lake surface.
     
@@ -130,24 +132,8 @@ def generate_wave_polylines(lake_polygon_path: Path, fetch_dir: Path,
         return 0
     
     def calc_wave_height(fetch_m):
-        """Calculate wave height from fetch."""
-        if fetch_m > 0 and wind_speed_ms > 0:
-            fetch_km = fetch_m / 1000.0
-            return 0.0016 * (wind_speed_ms ** 2) * np.sqrt(fetch_km)
-        return 0
-    
-    def classify_intensity(wave_height):
-        """Classify wave height into intensity category."""
-        if wave_height < 0.05:
-            return 'calm'
-        elif wave_height < 0.15:
-            return 'light'
-        elif wave_height < 0.30:
-            return 'moderate'
-        elif wave_height < 0.50:
-            return 'rough'
-        else:
-            return 'very_rough'
+        """Calculate wave height using Young & Verhagen (1996)."""
+        return wave_height_young_verhagen(wind_speed_ms, fetch_m, depth_m)
     
     segments = []
     line_id = 0
@@ -287,7 +273,7 @@ def generate_wave_polylines(lake_polygon_path: Path, fetch_dir: Path,
                 # Get fetch at segment midpoint
                 fetch_m = get_fetch_at_point(mid_pt.x, mid_pt.y)
                 wave_height = calc_wave_height(fetch_m)
-                intensity = classify_intensity(wave_height)
+                intensity = classify_wave_intensity(wave_height)
                 
                 segments.append({
                     'geometry': segment_geom,
@@ -563,7 +549,8 @@ def main():
         wave_amplitude=wave_params['wave_amplitude'],
         wave_frequency=wave_params['wave_frequency'],
         segment_length=segment_length,
-        utm_crs=utm_crs
+        utm_crs=utm_crs,
+        depth_m=config.avg_depth_m,
     )
 
     # Generate wind indicator
